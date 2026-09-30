@@ -1,0 +1,4 @@
+# Placeholder: bootstrap/bootstrap.sh replaces this file with your project's
+# Cloud KMS key.
+creation_rules:
+  - gcp_kms: projects/REPLACE_WITH_PROJECT_ID/locations/global/keyRings/sops/cryptoKeys/sops-key

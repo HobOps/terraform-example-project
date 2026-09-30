@@ -1,0 +1,27 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Decrypted copies of SOPS files. The encrypted files are meant to be committed.
+*.dec
+*.dec.*
+*.decrypted
+*.decrypted.*
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

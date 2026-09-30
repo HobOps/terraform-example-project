@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Runs terraform with what the encrypted GCS backend and the stacks need:
+#
+#   GOOGLE_ENCRYPTION_KEY   the state CSEK, decrypted with SOPS for this
+#                           process only. Unlike -backend-config=encryption_key=,
+#                           it is never written to .terraform/.
+#   TF_VAR_project_id, TF_VAR_region, TF_VAR_state_bucket
+#                           from bootstrap/config.env.
+#   -backend-config=bucket  added to `init`.
+#
+# Usage, from a stack directory (terraform/<stack>):
+#   ../../scripts/tf plan
+#   ../../scripts/tf state list
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config="${repo_root}/bootstrap/config.env"
+csek_file="${repo_root}/terraform/secrets/encryption_key.txt"
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f "$config" ]] || die "missing bootstrap/config.env: bootstrap the project first (docs/bootstrap.md)"
+[[ -f "$csek_file" ]] || die "missing terraform/secrets/encryption_key.txt: run bootstrap/bootstrap.sh"
+# shellcheck source=bootstrap/config.env.example
+source "$config"
+
+# Never run without the key: `init` on a new prefix would write an
+# unencrypted state, and every other command would fail against GCS.
+key="$(sops decrypt "$csek_file")"
+[[ "$(printf '%s' "$key" | base64 -d | wc -c)" -eq 32 ]] ||
+  die "terraform/secrets/encryption_key.txt does not decrypt to a 32-byte key"
+
+export GOOGLE_ENCRYPTION_KEY="$key"
+export TF_VAR_project_id="$PROJECT_ID"
+export TF_VAR_region="$REGION"
+export TF_VAR_state_bucket="$STATE_BUCKET"
+
+if [[ "${1:-}" == "init" ]]; then
+  shift
+  exec terraform init -backend-config="bucket=${STATE_BUCKET}" "$@"
+fi
+exec terraform "$@"
