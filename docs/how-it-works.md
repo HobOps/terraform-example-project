@@ -115,7 +115,7 @@ Because of this, the bucket cannot be set to accept only CSEK objects
 | Where | Contents | Handling |
 |-------|----------|----------|
 | `terraform/<stack>/.terraform/csek` | The CSEK | Mode 0600, git-ignored; `make clean` deletes it |
-| `tfplan` | The plan, including state values (not the CSEK) | Git-ignored; delete it after `terraform apply` |
+| `tfplan`, only if you use `terraform plan -out` | The plan, including state values (not the CSEK) | Git-ignored; delete it after `terraform apply` |
 | Output of `terraform state pull` | The whole state | Do not redirect it to files |
 | `errored.tfstate` | The whole state, when an apply could not save it | [Push it back and delete it](operations.md#an-apply-could-not-save-the-state-erroredtfstate) |
 | `config.auto.tfvars` | Project, region and bucket names | Git-ignored; written by `make init` |

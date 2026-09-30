@@ -72,8 +72,8 @@ git commit -m "chore: bootstrap my-project"
 
 cd terraform/foundation
 make init                               # creates the encrypted state
-terraform plan -out=tfplan              # review it
-terraform apply tfplan && rm tfplan
+terraform plan                          # review it
+terraform apply                         # shows the plan again and asks
 cd ../app && make init                  # then terraform plan / apply
 ```
 
@@ -102,8 +102,10 @@ creates that file, terraform stops with
 `Error decoding encryption key: illegal base64 data`, so it cannot write an
 unencrypted state by mistake.
 
-A plan file (`tfplan`) is plaintext and includes state values. It is
-git-ignored; delete it after `terraform apply`.
+You do not need plan files: `terraform apply` shows the plan and asks before
+changing anything. If you save one (`terraform plan -out=tfplan`), it is
+plaintext and includes state values. It is git-ignored; delete it after
+applying.
 
 ## Adding a stack
 

@@ -229,8 +229,8 @@ gcloud storage cat "gs://${STATE_BUCKET}/foundation/default.tfstate"
 From here on, use terraform directly:
 
 ```bash
-terraform plan -out=tfplan
-terraform apply tfplan && rm tfplan
+terraform plan
+terraform apply
 ```
 
 ### An existing local state
