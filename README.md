@@ -4,11 +4,11 @@ Template for Terraform projects on Google Cloud in which:
 
 - the Terraform state lives in a GCS bucket, encrypted with a
   **customer-supplied encryption key (CSEK)**;
-- the CSEK and every other secret are committed to git, encrypted with
-  **SOPS and Cloud KMS**;
-- the secrets never reach the state, and neither does the CSEK: `make init`
-  decrypts the CSEK into `.terraform/csek`, and Terraform only records that
-  path;
+- the CSEK is committed to git as `terraform/secrets/encryption_key.txt`,
+  encrypted with **SOPS and Cloud KMS**, and each stack has a `.sops.yaml`
+  that points SOPS at that KMS key;
+- the CSEK never reaches the state: `make init` decrypts it into
+  `.terraform/csek`, and Terraform only records that path;
 - `make init` is the only step that needs make. After it, you run
   `terraform` directly: `terraform plan`, `terraform apply`,
   `terraform state list`…
@@ -34,19 +34,24 @@ terraform plan/apply ─────────────────►  gs:
 
 ```
 bootstrap/
-  bootstrap.sh          creates the project, APIs, bucket, KMS key, .sops.yaml and CSEK
-  config.env.example    settings: copy it to config.env
+  bootstrap.sh            creates the GCP resources and the CSEK, fills in each .sops.yaml
+  config.env.example      settings: copy it to config.env
 scripts/
-  init                  what `make init` runs: CSEK to .terraform/csek, config.auto.tfvars, terraform init
+  init                    what `make init` runs
 terraform/
-  common.mk             the `make init` target shared by every stack
-  secrets/              SOPS-encrypted files: the CSEK and your secrets
-  foundation/           example stack: a bucket and a Secret Manager secret read from SOPS
-  app/                  example stack: reads the foundation state
+  common.mk               the `make init` target shared by every stack
+  secrets/
+    encryption_key.txt    the state CSEK, SOPS-encrypted (created by the bootstrap)
+  foundation/             example stack: a bucket
+    .sops.yaml            which Cloud KMS key SOPS uses from this directory
+    Makefile              include ../common.mk
+    backend.tf            prefix + encryption_key = ".terraform/csek"
+    variables.tf, versions.tf, providers.tf, main.tf, outputs.tf
+  app/                    example stack: reads the foundation state (same files)
 docs/
-  bootstrap.md          every bootstrap step with its manual commands
-  how-it-works.md       design, security model and caveats
-  operations.md         reading and restoring state, rotating the CSEK, onboarding
+  bootstrap.md            how to build all of this, step by step, by hand
+  how-it-works.md         design, security model and caveats
+  operations.md           reading and restoring state, rotating the CSEK, onboarding
 ```
 
 ## Requirements
@@ -77,8 +82,9 @@ terraform apply                         # shows the plan again and asks
 cd ../app && make init                  # then terraform plan / apply
 ```
 
-[docs/bootstrap.md](docs/bootstrap.md) explains each step and gives the manual
-commands the script runs.
+[docs/bootstrap.md](docs/bootstrap.md) builds the same thing by hand, one step
+at a time: the GCP resources, `terraform/secrets/encryption_key.txt`, the
+`.sops.yaml` of each stack and the stack files.
 
 ## Everyday use
 
@@ -102,16 +108,11 @@ creates that file, terraform stops with
 `Error decoding encryption key: illegal base64 data`, so it cannot write an
 unencrypted state by mistake.
 
-You do not need plan files: `terraform apply` shows the plan and asks before
-changing anything. If you save one (`terraform plan -out=tfplan`), it is
-plaintext and includes state values. It is git-ignored; delete it after
-applying.
-
 ## Adding a stack
 
 ```bash
 mkdir terraform/network
-cp terraform/app/{Makefile,versions.tf,providers.tf,variables.tf} terraform/network/
+cp terraform/app/{.sops.yaml,Makefile,versions.tf,providers.tf,variables.tf} terraform/network/
 cat > terraform/network/backend.tf <<'EOF'
 terraform {
   backend "gcs" {
@@ -128,11 +129,11 @@ To read another stack's outputs, copy `terraform/app/remote-state.tf`.
 
 ## Making it yours
 
-- Delete the example stacks (`terraform/foundation`, `terraform/app`) and
-  `terraform/secrets/example.secrets.yaml`, and drop
-  `secretmanager.googleapis.com` from `EXTRA_APIS` if you do not use it.
-- Add secrets with `sops edit terraform/secrets/<name>.secrets.yaml` and read
-  them as in `terraform/foundation/secrets.tf`.
+- Replace the example stacks (`terraform/foundation`, `terraform/app`) with
+  your own. Keep the `.sops.yaml`, `Makefile`, `backend.tf` and
+  `variables.tf` pattern.
+- If a stack needs its own secrets, see
+  [secrets in a stack](docs/how-it-works.md#secrets-in-a-stack).
 - Keep `bootstrap/config.env` committed: it is the source of truth for the
   names, and `make init` reads it.
 
@@ -140,18 +141,20 @@ To read another stack's outputs, copy `terraform/app/remote-state.tf`.
 
 The whole flow was run end to end against throwaway projects:
 
-- the bootstrap, twice (the second run changes nothing);
+- the bootstrap, twice (the second run changes nothing), including the KMS
+  key in each stack's `.sops.yaml`;
 - `make init`, then plain `terraform plan`, `apply` and destroy, for both
   stacks;
 - `terraform init` without `make init` (it fails and writes nothing);
 - restoring an older state version;
-- rotating the CSEK;
+- rotating the CSEK with the commands in `docs/operations.md`;
+- adding `terraform/secrets/<name>.secrets.yaml` from a stack directory;
 - the `TERRAFORM_MEMBERS` grants.
 
-The CSEK never showed up in `.terraform/terraform.tfstate`, in a plan file or
-in a state; only `.terraform/csek` holds it. Versions used: Terraform 1.15.8,
-hashicorp/google 8.5.0, carlpett/sops 1.4.1, SOPS 3.13.3 and gcloud 579. CI
-runs `terraform fmt`, `terraform validate` and ShellCheck.
+The CSEK never showed up in `.terraform/terraform.tfstate` or in a state:
+only `.terraform/csek` holds it. Versions used: Terraform 1.15.8,
+hashicorp/google 8.5.0, SOPS 3.13.3 and gcloud 579. CI runs `terraform fmt`,
+`terraform validate` and ShellCheck.
 
 ## License
 

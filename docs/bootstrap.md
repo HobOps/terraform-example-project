@@ -1,25 +1,30 @@
 # Bootstrap
 
-Terraform cannot create the things its own backend needs, so they are created
-once, before the first `terraform init`:
+This guide builds a project from scratch: first the Google Cloud resources
+the Terraform backend needs, then the files in the repository, and finally
+the encrypted state. `bootstrap/bootstrap.sh` does steps 1 to 6 (plus step 9
+when `TERRAFORM_MEMBERS` is set) from `bootstrap/config.env`. The commands
+below are exactly what it runs: use them to build everything by hand, or to
+see what the script will do.
 
-1. [Log in](#0-log-in)
-2. [Project and billing](#1-project-and-billing)
-3. [APIs](#2-apis)
-4. [State bucket](#3-state-bucket)
-5. [Cloud KMS key](#4-cloud-kms-key)
-6. [SOPS configuration](#5-sops-configuration)
-7. [State encryption key (CSEK)](#6-state-encryption-key-csek)
-8. [Secrets](#7-secrets)
-9. [Team access](#8-team-access)
-10. [Commit](#9-commit)
-11. [Initialize the Terraform state](#10-initialize-the-terraform-state)
+## What you are building
 
-`bootstrap/bootstrap.sh` runs steps 1-7 (and step 8 when `TERRAFORM_MEMBERS`
-is set) from `bootstrap/config.env`. Every step checks what exists first, so
-the script is safe to run again. The commands below are what it runs. Use
-them to bootstrap by hand, or to see what the script will do before you run
-it.
+```
+bootstrap/
+  config.env                 names and IDs used by bootstrap.sh and make init
+terraform/
+  common.mk                  the `make init` target
+  secrets/
+    encryption_key.txt       the state CSEK, SOPS-encrypted with Cloud KMS
+  <stack>/                   one directory per Terraform root module
+    .sops.yaml               which Cloud KMS key SOPS uses from this directory
+    Makefile                 include ../common.mk
+    backend.tf               gcs backend: prefix + encryption_key = ".terraform/csek"
+    variables.tf             project_id, region, state_bucket
+    versions.tf, providers.tf, main.tf, ...
+
+gs://<STATE_BUCKET>/<stack>/default.tfstate   one state per stack, encrypted with the CSEK
+```
 
 The examples use these variables. They match `bootstrap/config.env`:
 
@@ -27,15 +32,13 @@ The examples use these variables. They match `bootstrap/config.env`:
 PROJECT_ID=my-project-tf-1234
 ORG_ID=123456789012                  # or FOLDER_ID, or neither
 BILLING_ACCOUNT=0X0X0X-0X0X0X-0X0X0X
-REGION=us-central1
 STATE_BUCKET=${PROJECT_ID}-tfstate
 KMS_KEY_ID=projects/${PROJECT_ID}/locations/global/keyRings/sops/cryptoKeys/sops-key
 ```
 
-Run every command from the repository root: SOPS looks for `.sops.yaml` in the
-working directory and its parents.
+## Part 1: Google Cloud
 
-## 0. Log in
+### 0. Log in
 
 ```bash
 gcloud auth login                        # credentials for gcloud
@@ -45,9 +48,9 @@ gcloud auth application-default login    # credentials for SOPS and Terraform (A
 If you would rather not change your global ADC, you can give each command an
 access token instead:
 `export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`. gcloud,
-SOPS, the gcs backend and both providers accept it.
+SOPS, the gcs backend and the google provider accept it.
 
-## 1. Project and billing
+### 1. Project and billing
 
 ```bash
 gcloud projects create "$PROJECT_ID" --organization="$ORG_ID"   # or --folder=...
@@ -57,16 +60,15 @@ gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT"
 Find your billing account ID with `gcloud billing accounts list`. Cloud KMS
 and Cloud Storage both need billing enabled.
 
-## 2. APIs
+### 2. APIs
 
 ```bash
-gcloud services enable storage.googleapis.com cloudkms.googleapis.com \
-  secretmanager.googleapis.com --project="$PROJECT_ID"
+gcloud services enable storage.googleapis.com cloudkms.googleapis.com --project="$PROJECT_ID"
 ```
 
-Secret Manager is only for the example stacks (`EXTRA_APIS`).
+Add whatever your stacks use to `EXTRA_APIS`.
 
-## 3. State bucket
+### 3. State bucket
 
 ```bash
 gcloud storage buckets create "gs://${STATE_BUCKET}" --project="$PROJECT_ID" \
@@ -103,7 +105,7 @@ gcloud storage buckets update "gs://${STATE_BUCKET}" --versioning \
   Terraform writes its lock files with Google-managed encryption, so such a
   bucket rejects them (HTTP 412), and every `init` and `plan` fails.
 
-## 4. Cloud KMS key
+### 4. Cloud KMS key
 
 ```bash
 gcloud kms keyrings create sops --location=global --project="$PROJECT_ID"
@@ -119,23 +121,15 @@ destroyed, so choose the names on purpose. Never destroy a key version that
 SOPS files still use: those files, and the CSEK in them, could no longer be
 decrypted.
 
-## 5. SOPS configuration
+## Part 2: The repository
+
+### 5. The state CSEK: `terraform/secrets/encryption_key.txt`
 
 ```bash
-cat > .sops.yaml <<EOF
-creation_rules:
-  - gcp_kms: ${KMS_KEY_ID}
-EOF
-```
-
-With a single rule that has no `path_regex`, every file you encrypt in the
-repository uses the project's key.
-
-## 6. State encryption key (CSEK)
-
-```bash
+mkdir -p terraform/secrets
 head -c 32 /dev/urandom | base64 | tr -d '\n' |
-  sops encrypt --filename-override terraform/secrets/encryption_key.txt \
+  sops encrypt --gcp-kms "$KMS_KEY_ID" \
+    --filename-override terraform/secrets/encryption_key.txt \
     --output terraform/secrets/encryption_key.txt
 ```
 
@@ -143,10 +137,10 @@ head -c 32 /dev/urandom | base64 | tr -d '\n' |
   (44 characters).
 - The key exists unencrypted only inside the pipe. Never print it, or it ends
   up in your terminal scrollback and shell history.
-- `--filename-override` tells SOPS which `.sops.yaml` rule applies and which
-  format to use. A `.txt` file is stored as a SOPS *binary* file:
-  `{"data": "ENC[...]", "sops": {...}}`. Decrypting it returns the exact bytes
-  you encrypted.
+- `--gcp-kms` names the KMS key directly, so this step does not need a
+  `.sops.yaml`. `--filename-override` sets the format: a `.txt` file is stored
+  as a SOPS *binary* file, `{"data": "ENC[...]", "sops": {...}}`. Decrypting it
+  returns the exact bytes you encrypted.
 
 Check it without showing it:
 
@@ -158,18 +152,68 @@ The script never replaces an existing `encryption_key.txt`. A new key would
 lock you out of every state the old one encrypted. To change keys, see
 [rotating the CSEK](operations.md#rotate-the-csek).
 
-## 7. Secrets
+### 6. A `.sops.yaml` in each stack
 
-```bash
-sops edit terraform/secrets/example.secrets.yaml
+SOPS reads `.sops.yaml` from the directory you run it in, or the closest
+parent that has one. The file decides which key encrypts a new file, based
+on the file's path. Put one in every stack directory:
+
+```yaml
+# terraform/<stack>/.sops.yaml
+creation_rules:
+  # The state CSEK: ../secrets/encryption_key.txt
+  - path_regex: encryption_key\.txt$
+    gcp_kms: projects/my-project-tf-1234/locations/global/keyRings/sops/cryptoKeys/sops-key
+  # Other secrets, e.g. ../secrets/app.secrets.yaml
+  - path_regex: \.secrets\.yaml$
+    gcp_kms: projects/my-project-tf-1234/locations/global/keyRings/sops/cryptoKeys/sops-key
 ```
 
-`sops edit` opens `$EDITOR` on the decrypted content and writes it back
-encrypted; it creates the file when it does not exist. The bootstrap script
-creates `example.secrets.yaml` with a random `db_password` for the example
-stack.
+- **Decrypting** never needs it: each SOPS file records its own keys. That
+  means `make init` works without it.
+- **Encrypting** does. From a stack directory you can rotate the CSEK
+  (`../secrets/encryption_key.txt`) or add a secret such as
+  `../secrets/app.secrets.yaml`. SOPS refuses any other file name with
+  `no matching creation rules found`. Run it from the repository root, where
+  there is no `.sops.yaml`, and it fails with `config file not found, or has no
+  creation rules`.
 
-## 8. Team access
+The template's stacks ship with a placeholder key. `bootstrap.sh` fills in
+`KMS_KEY_ID` in every `terraform/*/.sops.yaml` that still has it.
+
+### 7. The stack files
+
+Each stack is a directory under `terraform/`, with these files next to your
+`.tf` code (see `terraform/foundation`):
+
+- **`Makefile`**: one line, `include ../common.mk`, which adds `make init`.
+- **`backend.tf`**:
+
+  ```hcl
+  terraform {
+    backend "gcs" {
+      prefix         = "<stack>"          # unique per stack
+      encryption_key = ".terraform/csek"  # a path, written by make init
+    }
+  }
+  ```
+
+  The bucket is left out on purpose. `make init` passes it from `config.env`.
+- **`variables.tf`**: declares `project_id`, `region` and `state_bucket`.
+  `make init` sets them in `config.auto.tfvars`.
+
+### 8. Commit
+
+```bash
+git add bootstrap/config.env terraform
+git commit -m "chore: bootstrap ${PROJECT_ID}"
+```
+
+`encryption_key.txt` is encrypted, so it is safe to commit. `config.env`
+holds names and IDs, no secrets. `.gitignore` keeps out `.terraform/` (and
+the decrypted CSEK in it), `config.auto.tfvars`, state files and plan files.
+
+### 9. Team access
 
 Whoever creates the project owns it and needs nothing else. Each additional
 person or group (`TERRAFORM_MEMBERS`) needs:
@@ -185,17 +229,7 @@ gcloud storage buckets add-iam-policy-binding "gs://${STATE_BUCKET}" \
 They also need permissions on the resources the stacks manage. Grant those
 separately.
 
-## 9. Commit
-
-```bash
-git add bootstrap/config.env .sops.yaml terraform/secrets
-git commit -m "chore: bootstrap ${PROJECT_ID}"
-```
-
-Everything under `terraform/secrets/` is encrypted, so it is safe to commit.
-`config.env` holds names and IDs, no secrets.
-
-## 10. Initialize the Terraform state
+## Part 3: Initialize the Terraform state
 
 ```bash
 cd terraform/foundation
@@ -204,16 +238,14 @@ make init
 
 `make init` runs `../../scripts/init`, which:
 
-1. decrypts the CSEK with SOPS into `.terraform/csek`, readable only by you
-   (mode 0600);
+1. decrypts `../secrets/encryption_key.txt` into `.terraform/csek`, readable
+   only by you (mode 0600);
 2. writes `config.auto.tfvars` with `project_id`, `region` and `state_bucket`
    from `config.env`. Terraform loads that file automatically;
-3. runs `terraform init -backend-config=bucket=$STATE_BUCKET`. The prefix
-   comes from the stack's `backend.tf`.
+3. runs `terraform init -backend-config=bucket=$STATE_BUCKET`.
 
-`backend.tf` sets `encryption_key = ".terraform/csek"`. The gcs backend
-accepts either the key or the path to a file that contains it, so Terraform
-records only the path.
+The gcs backend accepts either the key or the path to a file that contains
+it. `backend.tf` gives it the path, so Terraform records only the path.
 
 For a new prefix, the gcs backend takes the lock `<prefix>/default.tflock`,
 writes an empty `<prefix>/default.tfstate` encrypted with the CSEK, and

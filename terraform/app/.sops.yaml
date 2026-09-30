@@ -1,0 +1,9 @@
+# SOPS rules for files encrypted from this directory. bootstrap/bootstrap.sh
+# replaces the placeholder with the project's Cloud KMS key.
+creation_rules:
+  # The state CSEK: ../secrets/encryption_key.txt
+  - path_regex: encryption_key\.txt$
+    gcp_kms: projects/REPLACE_WITH_PROJECT_ID/locations/global/keyRings/sops/cryptoKeys/sops-key
+  # Other secrets, e.g. ../secrets/app.secrets.yaml
+  - path_regex: \.secrets\.yaml$
+    gcp_kms: projects/REPLACE_WITH_PROJECT_ID/locations/global/keyRings/sops/cryptoKeys/sops-key

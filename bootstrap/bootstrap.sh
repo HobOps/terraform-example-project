@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Creates what Terraform needs before its first run: the project, the APIs,
-# the state bucket, the Cloud KMS key, .sops.yaml and the state CSEK.
+# the state bucket, the Cloud KMS key, the state CSEK
+# (terraform/secrets/encryption_key.txt) and the key in each stack's
+# .sops.yaml.
 # docs/bootstrap.md explains each step and the equivalent manual commands.
 #
 # Idempotent: every step checks what exists and only creates what is
@@ -12,12 +14,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root" # sops looks for .sops.yaml from the working directory up
+cd "$repo_root"
 
 config="bootstrap/config.env"
-sops_config=".sops.yaml"
 csek_file="terraform/secrets/encryption_key.txt"
-example_secret_file="terraform/secrets/example.secrets.yaml"
 
 log() { printf '==> %s\n' "$*"; }
 die() {
@@ -134,25 +134,25 @@ grant_members() {
   done
 }
 
-write_sops_config() {
-  # The template ships a placeholder; a .sops.yaml you edited is left alone.
-  if [[ -f "$sops_config" ]] && ! grep -q REPLACE_WITH_PROJECT_ID "$sops_config"; then
-    grep -qF "$kms_key_id" "$sops_config" ||
-      printf 'WARNING: %s does not mention %s\n' "$sops_config" "$kms_key_id" >&2
-    log "$sops_config already configured"
-    return
-  fi
-  log "writing $sops_config"
-  cat >"$sops_config" <<EOF
-# Written by bootstrap/bootstrap.sh: SOPS encrypts every file in this repo
-# with the project's Cloud KMS key.
-creation_rules:
-  - gcp_kms: ${kms_key_id}
-EOF
+# Each stack's .sops.yaml ships with a placeholder; fill in the KMS key.
+# A .sops.yaml you already edited is left alone.
+configure_stack_sops() {
+  local file
+  for file in terraform/*/.sops.yaml; do
+    [[ -f "$file" ]] || continue
+    if grep -q REPLACE_WITH_PROJECT_ID "$file"; then
+      log "setting the KMS key in $file"
+      sed -i.bak "s|gcp_kms: projects/REPLACE_WITH_PROJECT_ID/.*|gcp_kms: ${kms_key_id}|" "$file"
+      rm -f "${file}.bak"
+    else
+      log "$file already configured"
+    fi
+  done
 }
 
 # The CSEK is 32 random bytes in base64, the format GCS expects. It only
 # exists unencrypted inside this pipe: SOPS writes it encrypted with KMS.
+# --gcp-kms names the key directly, so this works without any stack.
 ensure_csek() {
   if [[ -f "$csek_file" ]]; then
     local size
@@ -164,18 +164,7 @@ ensure_csek() {
   log "generating the state CSEK in $csek_file"
   mkdir -p "$(dirname "$csek_file")"
   head -c 32 /dev/urandom | base64 | tr -d '\n' |
-    sops encrypt --filename-override "$csek_file" --output "$csek_file"
-}
-
-# Demo value for the example stacks; delete the file along with them.
-ensure_example_secret() {
-  if [[ -f "$example_secret_file" ]]; then
-    log "$example_secret_file exists"
-    return
-  fi
-  log "creating $example_secret_file with a random demo password"
-  printf 'db_password: %s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '\n/+=')" |
-    sops encrypt --filename-override "$example_secret_file" --output "$example_secret_file"
+    sops encrypt --gcp-kms "$kms_key_id" --filename-override "$csek_file" --output "$csek_file"
 }
 
 ensure_project
@@ -184,14 +173,13 @@ enable_apis
 ensure_bucket
 ensure_kms_key
 grant_members
-write_sops_config
 ensure_csek
-ensure_example_secret
+configure_stack_sops
 
 cat <<EOF
 
 Bootstrap complete. Next steps:
-  git add $config $sops_config terraform/secrets
+  git add $config terraform
   git commit -m "chore: bootstrap $PROJECT_ID"
   make -C terraform/foundation init
   terraform -chdir=terraform/foundation plan

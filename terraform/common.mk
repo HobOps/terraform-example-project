@@ -11,5 +11,5 @@ help: ## List the targets
 init: ## Decrypt the state CSEK to .terraform/csek, write config.auto.tfvars, terraform init
 	@../../scripts/init $(ARGS)
 
-clean: ## Delete .terraform/ (and the decrypted CSEK in it), config.auto.tfvars and tfplan
-	@rm -rf .terraform config.auto.tfvars tfplan
+clean: ## Delete .terraform/ (and the decrypted CSEK in it) and config.auto.tfvars
+	@rm -rf .terraform config.auto.tfvars
