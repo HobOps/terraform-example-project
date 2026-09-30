@@ -130,7 +130,7 @@ mkdir -p terraform/secrets
 head -c 32 /dev/urandom | base64 | tr -d '\n' |
   sops encrypt --gcp-kms "$KMS_KEY_ID" \
     --filename-override terraform/secrets/encryption_key.txt \
-    --output terraform/secrets/encryption_key.txt
+    --output terraform/secrets/encryption_key.txt /dev/stdin
 ```
 
 - 32 random bytes form an AES-256 key. GCS expects it base64-encoded
@@ -141,6 +141,8 @@ head -c 32 /dev/urandom | base64 | tr -d '\n' |
   `.sops.yaml`. `--filename-override` sets the format: a `.txt` file is stored
   as a SOPS *binary* file, `{"data": "ENC[...]", "sops": {...}}`. Decrypting it
   returns the exact bytes you encrypted.
+- `/dev/stdin` names the input explicitly. SOPS 3.9 does not read the pipe on
+  its own (`Error: no file specified`); newer versions accept both forms.
 
 Check it without showing it:
 

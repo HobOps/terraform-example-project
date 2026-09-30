@@ -99,7 +99,7 @@ CLOUDSDK_STORAGE_KEY_STORE_PATH=<(printf 'decryption_keys:\n  - %s\n' "$old") \
 
 # 3. Store the new key. SOPS takes the KMS key from ./.sops.yaml.
 printf '%s' "$new" | sops encrypt --filename-override ../secrets/encryption_key.txt \
-  --output ../secrets/encryption_key.txt
+  --output ../secrets/encryption_key.txt /dev/stdin
 unset old new
 
 # 4. Refresh .terraform/csek in every stack and check it, then commit both files.

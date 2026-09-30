@@ -164,7 +164,7 @@ ensure_csek() {
   log "generating the state CSEK in $csek_file"
   mkdir -p "$(dirname "$csek_file")"
   head -c 32 /dev/urandom | base64 | tr -d '\n' |
-    sops encrypt --gcp-kms "$kms_key_id" --filename-override "$csek_file" --output "$csek_file"
+    sops encrypt --gcp-kms "$kms_key_id" --filename-override "$csek_file" --output "$csek_file" /dev/stdin
 }
 
 ensure_project

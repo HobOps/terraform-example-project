@@ -153,8 +153,9 @@ The whole flow was run end to end against throwaway projects:
 
 The CSEK never showed up in `.terraform/terraform.tfstate` or in a state:
 only `.terraform/csek` holds it. Versions used: Terraform 1.15.8,
-hashicorp/google 8.5.0, SOPS 3.13.3 and gcloud 579. CI runs `terraform fmt`,
-`terraform validate` and ShellCheck.
+hashicorp/google 8.5.0, SOPS 3.13.3 and gcloud 579; the SOPS commands were
+also checked with SOPS 3.9.4. CI runs `terraform fmt`, `terraform validate`
+and ShellCheck.
 
 ## License
 
