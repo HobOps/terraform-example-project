@@ -193,5 +193,6 @@ cat <<EOF
 Bootstrap complete. Next steps:
   git add $config $sops_config terraform/secrets
   git commit -m "chore: bootstrap $PROJECT_ID"
-  make -C terraform/foundation init plan
+  make -C terraform/foundation init
+  terraform -chdir=terraform/foundation plan
 EOF

@@ -3,6 +3,8 @@
 *.tfstate
 *.tfstate.*
 tfplan
+# Written by `make init` from bootstrap/config.env.
+config.auto.tfvars
 *.tfplan
 crash.log
 crash.*.log

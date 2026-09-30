@@ -26,6 +26,8 @@ keystore() { printf 'encryption_key: %s\n' "$(sops decrypt terraform/secrets/enc
 CLOUDSDK_STORAGE_KEY_STORE_PATH=<(keystore) gcloud storage cat "gs://${STATE_BUCKET}/foundation/default.tfstate"
 ```
 
+From an initialized stack directory, `$(cat .terraform/csek)` works as well.
+
 These replace `gsutil -o 'GSUtil:encryption_key=…'`: gsutil is deprecated,
 and that flag puts the key in the process arguments and the shell history.
 Setting `CLOUDSDK_STORAGE_ENCRYPTION_KEY` or
@@ -34,11 +36,11 @@ not exist.
 
 ## Read the state
 
-With Terraform, from the stack directory:
+With Terraform, from an initialized stack directory:
 
 ```bash
-../../scripts/tf state list
-../../scripts/tf state pull | jq '.serial, .lineage'
+terraform state list
+terraform state pull | jq '.serial, .lineage'
 ```
 
 With gcloud, see [above](#give-the-csek-to-gcloud).
@@ -51,7 +53,7 @@ gcloud storage ls -a -l "gs://${STATE_BUCKET}/foundation/default.tfstate"
 CLOUDSDK_STORAGE_KEY_STORE_PATH=<(keystore) gcloud storage cp \
   "gs://${STATE_BUCKET}/foundation/default.tfstate#1790728537546772" \
   "gs://${STATE_BUCKET}/foundation/default.tfstate"
-(cd terraform/foundation && make plan)
+(cd terraform/foundation && terraform plan)
 ```
 
 The key store's `encryption_key` does two jobs here: it decrypts the old
@@ -71,9 +73,9 @@ delete it:
 
 ```bash
 cd terraform/<stack>
-../../scripts/tf state push errored.tfstate
+terraform state push errored.tfstate
 rm errored.tfstate
-make plan   # should show no unexpected changes
+terraform plan   # should show no unexpected changes
 ```
 
 ## Rotate the CSEK
@@ -97,8 +99,10 @@ printf '%s' "$new" | sops encrypt --filename-override terraform/secrets/encrypti
   --output terraform/secrets/encryption_key.txt
 unset old new
 
-# 4. Check every stack, then commit both files.
-(cd terraform/foundation && make plan)   # No changes
+# 4. Refresh .terraform/csek in every stack and check it, then commit both files.
+for stack in terraform/*/; do
+  [ -f "${stack}backend.tf" ] && (cd "$stack" && make init >/dev/null && terraform plan)
+done                                    # No changes
 ```
 
 - The new key has to go in the `--encryption-key` flag. Only that flag makes
@@ -108,8 +112,11 @@ unset old new
 - Check the result: `gcloud storage objects describe <object>
   --format='value(decryption_key_hash_sha256)'` should show a new hash for
   every current state object.
-- Nobody needs to run `init` again, because the key is not stored in
-  `.terraform/`.
+- Everyone else runs `make init` in each stack after pulling the new
+  `encryption_key.txt`. Until they do, their `.terraform/csek` holds the old
+  key and terraform fails with `Failed to open state file … HTTP response
+  code 400`. No `-reconfigure` is needed: the backend configuration is still
+  the same path.
 - Delete `encryption_key.previous.txt` once all versions encrypted with it are
   gone: that is after `STATE_VERSIONS_TO_KEEP` writes on every stack, plus the
   7 days of soft delete.
@@ -133,7 +140,10 @@ change. Also grant them permissions on the resources the stacks manage.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ResourceIsEncryptedWithCustomerEncryptionKey` | Terraform ran without the CSEK | Use `make` or `../../scripts/tf` |
+| `Error decoding encryption key: illegal base64 data at input byte 0` | `.terraform/csek` does not exist yet, or `make clean` deleted it | `make init` |
+| `Failed to open state file … HTTP response code 400` | `.terraform/csek` has a different key than the state (someone rotated it) | Pull, then `make init` |
+| `ResourceIsEncryptedWithCustomerEncryptionKey` | The backend got no key at all (`encryption_key` missing from `backend.tf`) | Add `encryption_key = ".terraform/csek"`, then `make init` |
+| Terraform asks for `project_id`, or `No value for required variable` | `config.auto.tfvars` is missing | `make init` |
 | `Missing decryption key with SHA256 hash …` | gcloud has no key, or the object uses another key (a version from before a rotation) | Pass a [key store](#give-the-csek-to-gcloud); add the previous key under `decryption_keys` |
 | SOPS: `no master key was able to decrypt the file` | No ADC, an expired session, or no KMS permission | `gcloud auth application-default login`; check `roles/cloudkms.cryptoKeyEncrypterDecrypter` |
 | `does not decrypt to a 32-byte key` | `encryption_key.txt` has something other than a base64 AES-256 key | Restore it from git |

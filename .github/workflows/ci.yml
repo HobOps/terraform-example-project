@@ -43,4 +43,4 @@ jobs:
           done
 
       - name: ShellCheck
-        run: shellcheck -x bootstrap/bootstrap.sh scripts/tf
+        run: shellcheck -x bootstrap/bootstrap.sh scripts/init

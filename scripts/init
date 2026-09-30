@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# What `make init` runs in a stack directory. It prepares what plain
+# terraform needs and then runs `terraform init`; afterwards use terraform
+# directly (terraform plan, terraform apply, ...).
+#
+#   .terraform/csek      the state CSEK, decrypted with SOPS (mode 0600).
+#                        backend.tf and remote-state.tf point at this path.
+#   config.auto.tfvars   project_id, region and state_bucket from
+#                        bootstrap/config.env.
+#
+# Run it again after pulling a new CSEK or editing bootstrap/config.env.
+# Usage, from terraform/<stack>: make init [ARGS="-upgrade"]
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config="${repo_root}/bootstrap/config.env"
+csek_file="${repo_root}/terraform/secrets/encryption_key.txt"
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f backend.tf ]] || die "run it from a stack directory (terraform/<stack>)"
+[[ -f "$config" ]] || die "missing bootstrap/config.env: bootstrap the project first (docs/bootstrap.md)"
+[[ -f "$csek_file" ]] || die "missing terraform/secrets/encryption_key.txt: run bootstrap/bootstrap.sh"
+# shellcheck source=bootstrap/config.env.example
+source "$config"
+
+key="$(sops decrypt "$csek_file")"
+[[ "$(printf '%s' "$key" | base64 -d | wc -c)" -eq 32 ]] ||
+  die "terraform/secrets/encryption_key.txt does not decrypt to a 32-byte key"
+
+# Write to a new file and rename it, so it is created 0600 even if an older
+# .terraform/csek had wider permissions.
+mkdir -p .terraform
+(umask 077 && printf '%s' "$key" >.terraform/csek.tmp)
+mv -f .terraform/csek.tmp .terraform/csek
+
+cat >config.auto.tfvars <<TFVARS
+# Written by \`make init\` from bootstrap/config.env: edit that file instead.
+project_id   = "${PROJECT_ID}"
+region       = "${REGION}"
+state_bucket = "${STATE_BUCKET}"
+TFVARS
+
+exec terraform init -backend-config="bucket=${STATE_BUCKET}" "$@"

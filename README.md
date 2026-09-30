@@ -6,8 +6,12 @@ Template for Terraform projects on Google Cloud in which:
   **customer-supplied encryption key (CSEK)**;
 - the CSEK and every other secret are committed to git, encrypted with
   **SOPS and Cloud KMS**;
-- neither the CSEK nor the secrets are ever written to disk in plaintext:
-  not in `.terraform/`, not in the state.
+- the secrets never reach the state, and neither does the CSEK: `make init`
+  decrypts the CSEK into `.terraform/csek`, and Terraform only records that
+  path;
+- `make init` is the only step that needs make. After it, you run
+  `terraform` directly: `terraform plan`, `terraform apply`,
+  `terraform state list`…
 
 Create your repository with **Use this template**, then follow the
 [quick start](#quick-start).
@@ -17,9 +21,12 @@ Cloud KMS key (sops-key)                      never leaves Google
         │ decrypts
         ▼
 terraform/secrets/encryption_key.txt          committed, SOPS-encrypted
-        │ scripts/tf: sops decrypt → GOOGLE_ENCRYPTION_KEY (process only)
+        │ make init: sops decrypt
         ▼
-terraform (gcs backend) ──────────────►  gs://<STATE_BUCKET>/<stack>/default.tfstate
+terraform/<stack>/.terraform/csek             local, 0600, git-ignored
+        │ backend "gcs" { encryption_key = ".terraform/csek" }
+        ▼
+terraform plan/apply ─────────────────►  gs://<STATE_BUCKET>/<stack>/default.tfstate
                                           encrypted by GCS with the CSEK
 ```
 
@@ -30,9 +37,9 @@ bootstrap/
   bootstrap.sh          creates the project, APIs, bucket, KMS key, .sops.yaml and CSEK
   config.env.example    settings: copy it to config.env
 scripts/
-  tf                    terraform wrapper: puts the CSEK and the settings in the environment
+  init                  what `make init` runs: CSEK to .terraform/csek, config.auto.tfvars, terraform init
 terraform/
-  common.mk             make targets shared by every stack
+  common.mk             the `make init` target shared by every stack
   secrets/              SOPS-encrypted files: the CSEK and your secrets
   foundation/           example stack: a bucket and a Secret Manager secret read from SOPS
   app/                  example stack: reads the foundation state
@@ -65,9 +72,9 @@ git commit -m "chore: bootstrap my-project"
 
 cd terraform/foundation
 make init                               # creates the encrypted state
-make plan                               # review it
-make apply
-cd ../app && make init plan             # then make apply
+terraform plan -out=tfplan              # review it
+terraform apply tfplan && rm tfplan
+cd ../app && make init                  # then terraform plan / apply
 ```
 
 [docs/bootstrap.md](docs/bootstrap.md) explains each step and gives the manual
@@ -75,21 +82,28 @@ commands the script runs.
 
 ## Everyday use
 
-From a stack directory (`terraform/<stack>`):
+In each stack directory (`terraform/<stack>`), run `make init` once. After
+that, use terraform as usual. Run `make init` again after:
 
-| Command | What it does |
-|---------|--------------|
-| `make init` | Initialize the backend and the providers |
-| `make plan` | Plan into `./tfplan` |
-| `make apply` | Apply `./tfplan`, then delete it (a plan file is plaintext) |
-| `make plan-destroy` | Plan a destroy into `./tfplan`; review it, then `make apply` |
-| `make output` | Show the outputs |
-| `make clean` | Delete `.terraform/` and `./tfplan` |
-| `../../scripts/tf <args>` | Any other terraform command: `state list`, `import`, … |
+- cloning the repository or running `make clean`;
+- pulling a new CSEK (after a [rotation](docs/operations.md#rotate-the-csek));
+- editing `bootstrap/config.env`.
 
-Do not run `terraform` directly: it would not have the CSEK. Against an
-existing state it fails with `ResourceIsEncryptedWithCustomerEncryptionKey`;
-against a new prefix, `init` would create an **unencrypted** state.
+`make init` does three things:
+
+1. writes the decrypted CSEK to `.terraform/csek` (mode 0600);
+2. writes `config.auto.tfvars` (`project_id`, `region`, `state_bucket`) from
+   `bootstrap/config.env`;
+3. runs `terraform init -backend-config=bucket=$STATE_BUCKET`. Pass extra
+   options with `make init ARGS="-upgrade"`.
+
+`backend.tf` points `encryption_key` at `.terraform/csek`. Until `make init`
+creates that file, terraform stops with
+`Error decoding encryption key: illegal base64 data`, so it cannot write an
+unencrypted state by mistake.
+
+A plan file (`tfplan`) is plaintext and includes state values. It is
+git-ignored; delete it after `terraform apply`.
 
 ## Adding a stack
 
@@ -99,14 +113,15 @@ cp terraform/app/{Makefile,versions.tf,providers.tf,variables.tf} terraform/netw
 cat > terraform/network/backend.tf <<'EOF'
 terraform {
   backend "gcs" {
-    prefix = "network" # unique per stack
+    prefix         = "network" # unique per stack
+    encryption_key = ".terraform/csek"
   }
 }
 EOF
 cd terraform/network && make init
 ```
 
-Stacks must live at `terraform/<stack>`: `common.mk` calls `../../scripts/tf`.
+Stacks must live at `terraform/<stack>`: `common.mk` calls `../../scripts/init`.
 To read another stack's outputs, copy `terraform/app/remote-state.tf`.
 
 ## Making it yours
@@ -117,21 +132,24 @@ To read another stack's outputs, copy `terraform/app/remote-state.tf`.
 - Add secrets with `sops edit terraform/secrets/<name>.secrets.yaml` and read
   them as in `terraform/foundation/secrets.tf`.
 - Keep `bootstrap/config.env` committed: it is the source of truth for the
-  names, and `scripts/tf` reads it.
+  names, and `make init` reads it.
 
 ## Tested
 
-The whole flow was run end to end against a throwaway project:
+The whole flow was run end to end against throwaway projects:
 
 - the bootstrap, twice (the second run changes nothing);
-- `init`, `plan`, `apply` and destroy for both stacks;
+- `make init`, then plain `terraform plan`, `apply` and destroy, for both
+  stacks;
+- `terraform init` without `make init` (it fails and writes nothing);
 - restoring an older state version;
 - rotating the CSEK;
 - the `TERRAFORM_MEMBERS` grants.
 
-Versions used: Terraform 1.15.8, hashicorp/google 8.5.0, carlpett/sops 1.4.1,
-SOPS 3.13.3 and gcloud 579. CI runs `terraform fmt`, `terraform validate` and
-ShellCheck.
+The CSEK never showed up in `.terraform/terraform.tfstate`, in a plan file or
+in a state; only `.terraform/csek` holds it. Versions used: Terraform 1.15.8,
+hashicorp/google 8.5.0, carlpett/sops 1.4.1, SOPS 3.13.3 and gcloud 579. CI
+runs `terraform fmt`, `terraform validate` and ShellCheck.
 
 ## License
 

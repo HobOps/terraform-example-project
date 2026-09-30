@@ -6,6 +6,6 @@ resource "google_storage_bucket" "example" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
 
-  # Lets `make plan-destroy` remove the example even when it has objects.
+  # Lets `terraform destroy` remove the example even when it has objects.
   force_destroy = true
 }

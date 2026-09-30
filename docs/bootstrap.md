@@ -202,14 +202,18 @@ cd terraform/foundation
 make init
 ```
 
-`make init` runs `../../scripts/tf init`, which:
+`make init` runs `../../scripts/init`, which:
 
-1. decrypts the CSEK with SOPS and exports it as `GOOGLE_ENCRYPTION_KEY`, for
-   that process only;
-2. exports `TF_VAR_project_id`, `TF_VAR_region` and `TF_VAR_state_bucket`
-   from `config.env`;
+1. decrypts the CSEK with SOPS into `.terraform/csek`, readable only by you
+   (mode 0600);
+2. writes `config.auto.tfvars` with `project_id`, `region` and `state_bucket`
+   from `config.env`. Terraform loads that file automatically;
 3. runs `terraform init -backend-config=bucket=$STATE_BUCKET`. The prefix
    comes from the stack's `backend.tf`.
+
+`backend.tf` sets `encryption_key = ".terraform/csek"`. The gcs backend
+accepts either the key or the path to a file that contains it, so Terraform
+records only the path.
 
 For a new prefix, the gcs backend takes the lock `<prefix>/default.tflock`,
 writes an empty `<prefix>/default.tfstate` encrypted with the CSEK, and
@@ -222,12 +226,16 @@ gcloud storage cat "gs://${STATE_BUCKET}/foundation/default.tfstate"
                                                       # fails: Missing decryption key
 ```
 
-`.terraform/terraform.tfstate` stores only `bucket` and `prefix`. The key is
-not in it, unlike with `terraform init -backend-config="encryption_key=..."`.
+From here on, use terraform directly:
+
+```bash
+terraform plan -out=tfplan
+terraform apply tfplan && rm tfplan
+```
 
 ### An existing local state
 
 If the stack already has a local `terraform.tfstate`, add `backend.tf` and
-run `../../scripts/tf init -migrate-state`. Terraform copies the state into
-the bucket, encrypted with the CSEK. Then delete the local file: it is
+run `make init ARGS="-migrate-state"`. Terraform copies the state into the
+bucket, encrypted with the CSEK. Then delete the local file: it is
 plaintext.

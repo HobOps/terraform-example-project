@@ -5,7 +5,7 @@
 | Key | Where it lives | What it protects |
 |-----|----------------|------------------|
 | Cloud KMS key `sops-key` | Inside Cloud KMS; it never leaves Google | The data key of every SOPS file |
-| State CSEK (AES-256) | `terraform/secrets/encryption_key.txt`, SOPS-encrypted | The Terraform state objects in GCS |
+| State CSEK (AES-256) | `terraform/secrets/encryption_key.txt`, SOPS-encrypted, plus a decrypted copy in each initialized stack at `.terraform/csek` | The Terraform state objects in GCS |
 | SOPS data keys | Inside each SOPS file, encrypted by KMS | That file's values |
 
 To read a state file you need two permissions: read access to the bucket and
@@ -36,27 +36,33 @@ second factor. The price is that you have to guard it and rotate it yourself.
 
 ## Design decisions
 
-### The CSEK goes through the environment, not `-backend-config`
+### The CSEK is a file, and Terraform only knows its path
 
-`terraform init -backend-config="encryption_key=…"` works, but Terraform then
-saves the whole backend configuration in `.terraform/terraform.tfstate`, and
-the key is included, in plaintext. From then on only `.gitignore` protects
-it.
+The gcs backend's `encryption_key` accepts either the key itself or the path
+to a file that contains it. There are three ways to give Terraform the key:
 
-`scripts/tf` exports `GOOGLE_ENCRYPTION_KEY` instead. The gcs backend reads it
-when `encryption_key` is not set, and never saves it. The result:
+| Option | Plain `terraform` works after `init` | Where the key ends up |
+|--------|:---:|------------------------|
+| `terraform init -backend-config="encryption_key=<key>"` | yes | `.terraform/terraform.tfstate` and **every plan file** |
+| `GOOGLE_ENCRYPTION_KEY` in the environment | no: every command needs a wrapper | Only the process environment |
+| **`encryption_key = ".terraform/csek"` in `backend.tf`** (this template) | yes | Only `.terraform/csek` (mode 0600, git-ignored) |
 
-- `.terraform/terraform.tfstate` holds only `bucket` and `prefix`;
-- the key exists only while a terraform command is running;
-- after a [CSEK rotation](operations.md#rotate-the-csek) nobody has to run
-  `init` again.
+With the path, the result is:
 
-### The wrapper refuses to run without a key
+- `.terraform/terraform.tfstate`, the plan files and the states record
+  `.terraform/csek`, never the key. This was checked in the end-to-end test.
+- **It fails closed.** Without the file, the backend treats the string
+  `.terraform/csek` as the key itself, and it is not valid base64. Plain
+  `terraform init` stops with
+  `Error decoding encryption key: illegal base64 data at input byte 0` and
+  writes nothing. It never creates an unencrypted state.
+- **Rotating is simple.** After a
+  [CSEK rotation](operations.md#rotate-the-csek), `make init` rewrites the
+  file. The backend configuration, which is just the path, does not change,
+  so no `-reconfigure` is needed.
 
-If `GOOGLE_ENCRYPTION_KEY` is empty, `init` on a new prefix writes the first
-state with Google-managed encryption. `scripts/tf` stops instead: it stops if
-SOPS cannot decrypt the file (for example, because you have no KMS
-permission), and it stops if the result is not 32 bytes.
+The price is that the key sits on disk in every initialized stack, like it
+does with `-backend-config`. `make clean` deletes it.
 
 ### Secrets never reach the state
 
@@ -86,10 +92,10 @@ protects it there.
 
 ### Reading another stack's state
 
-`terraform/app/remote-state.tf` does not set `encryption_key`. The
-`terraform_remote_state` data source uses the same gcs backend code, so it
-also falls back to `GOOGLE_ENCRYPTION_KEY`. All stacks in one bucket share
-one CSEK.
+`terraform/app/remote-state.tf` sets `encryption_key = ".terraform/csek"`,
+the same path as `backend.tf`. The `terraform_remote_state` data source is
+saved in the state, but it only holds the path. All stacks in one bucket
+share one CSEK.
 
 ### Versions you can restore
 
@@ -108,8 +114,9 @@ Because of this, the bucket cannot be set to accept only CSEK objects
 
 | Where | Contents | Handling |
 |-------|----------|----------|
-| `tfplan` | The plan, including state values | Git-ignored; `make apply` deletes it |
-| Output of `scripts/tf state pull` | The whole state | Do not redirect it to files |
+| `terraform/<stack>/.terraform/csek` | The CSEK | Mode 0600, git-ignored; `make clean` deletes it |
+| `tfplan` | The plan, including state values (not the CSEK) | Git-ignored; delete it after `terraform apply` |
+| Output of `terraform state pull` | The whole state | Do not redirect it to files |
 | `errored.tfstate` | The whole state, when an apply could not save it | [Push it back and delete it](operations.md#an-apply-could-not-save-the-state-erroredtfstate) |
-| The `terraform` process environment | The CSEK | Only while the command runs |
+| `config.auto.tfvars` | Project, region and bucket names | Git-ignored; written by `make init` |
 | `<prefix>/default.tflock` | Lock metadata | Not sensitive |
